@@ -1,0 +1,65 @@
+name: Deploy Cloud Mail
+
+on:
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: mail-worker
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9
+          run_install: false
+      - name: Install worker deps
+        run: pnpm install
+      - name: Write wrangler.toml
+        run: |
+          cat > wrangler.toml << 'EOF'
+          name = "cloud-mail"
+          main = "src/index.js"
+          compatibility_date = "2025-06-04"
+          [observability]
+          enabled = true
+          [[d1_databases]]
+          binding = "db"
+          database_name = "cloud-mail-db"
+          database_id = "2ea72c31-371b-4e75-aefd-52044714b963"
+          [[kv_namespaces]]
+          binding = "kv"
+          id = "d87733f730294a5e85ce151f0d00a87c"
+          [[r2_buckets]]
+          binding = "r2"
+          bucket_name = "cloud-mail-r2"
+          [assets]
+          binding = "assets"
+          directory = "./dist"
+          not_found_handling = "single-page-application"
+          run_worker_first = true
+          [triggers]
+          crons = ["0 16 * * *"]
+          [vars]
+          orm_log = "false"
+          domain = "mail.yycn.eu.cc"
+          admin = "admin@mail.yycn.eu.cc"
+          jwt_secret = "cnisland2026mailjwt"
+          ADMIN_PASSWORD = "cnisland2026mail"
+          [build]
+          command = "pnpm --prefix ../mail-vue install && pnpm --prefix ../mail-vue run build"
+          EOF
+      - name: Deploy
+        uses: cloudflare/wrangler-action@v3
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          command: deploy
+          packageManager: pnpm
+          wranglerVersion: "3.114.17"
+          workingDirectory: mail-worker
