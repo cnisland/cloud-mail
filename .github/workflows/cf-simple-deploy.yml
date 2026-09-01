@@ -47,8 +47,8 @@ jobs:
           crons = ["0 16 * * *"]
           [vars]
           orm_log = "false"
-          domain = '["mail.yycn.eu.cc"]'
-          admin = "admin@mail.yycn.eu.cc"
+          domain = '["yycn.eu.cc"]'
+          admin = "admin@yycn.eu.cc"
           jwt_secret = "cnisland2026mailjwt"
           ADMIN_PASSWORD = "cnisland2026mail"
           [build]
