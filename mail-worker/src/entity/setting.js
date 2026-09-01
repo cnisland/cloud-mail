@@ -46,6 +46,21 @@ export const setting = sqliteTable('setting', {
 	tgMsgTo: text('tg_msg_to').default('show').notNull(),
 	tgMsgText: text('tg_msg_text').default('hide').notNull(),
 	minEmailPrefix: integer('min_email_prefix').default(0).notNull(),
-	emailPrefixFilter: text('email_prefix_filter').default('').notNull()
+	emailPrefixFilter: text('email_prefix_filter').default('').notNull(),
+	blackSubject: text('black_subject').default('').notNull(),
+	blackContent: text('black_content').default('').notNull(),
+	blackFrom: text('black_from').default('').notNull(),
+	aiCode: integer('ai_code').default(1).notNull(),
+	syncDelete: integer('sync_delete').default(1).notNull(),
+	aiCodeFilter: text('ai_code_filter').default('').notNull(),
+	linuxdoClientId: text('linuxdo_client_id').default('').notNull(),
+	linuxdoClientSecret: text('linuxdo_client_secret').default('').notNull(),
+	linuxdoSwitch: integer('linuxdo_switch').default(1).notNull(),
+	githubClientId: text('github_client_id').default('').notNull(),
+	githubClientSecret: text('github_client_secret').default('').notNull(),
+	githubSwitch: integer('github_switch').default(1).notNull(),
+	googleClientId: text('google_client_id').default('').notNull(),
+	googleClientSecret: text('google_client_secret').default('').notNull(),
+	googleSwitch: integer('google_switch').default(1).notNull()
 });
 export default setting
