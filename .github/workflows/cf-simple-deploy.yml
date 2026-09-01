@@ -52,7 +52,7 @@ jobs:
           jwt_secret = "cnisland2026mailjwt"
           ADMIN_PASSWORD = "cnisland2026mail"
           [build]
-          command = "pnpm --prefix ../mail-vue install && pnpm --prefix ../mail-vue run build"
+          command = "pnpm --prefix ../mail-vue install --no-frozen-lockfile && pnpm --prefix ../mail-vue run build"
           EOF
       - name: Deploy
         uses: cloudflare/wrangler-action@v3
