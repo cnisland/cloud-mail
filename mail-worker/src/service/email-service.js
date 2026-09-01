@@ -1,5 +1,6 @@
 import orm from '../entity/orm';
 import email from '../entity/email';
+import { emailListColumns, emailBriefColumns, EMAIL_LIST_TEXT_LEN } from '../lib/email-list-columns';
 import { attConst, emailConst, isDel, settingConst } from '../const/entity-const';
 import { and, desc, eq, gt, inArray, lt, count, asc, sql, ne, or, like, lte, gte } from 'drizzle-orm';
 import { star } from '../entity/star';
@@ -7,6 +8,7 @@ import settingService from './setting-service';
 import accountService from './account-service';
 import BizError from '../error/biz-error';
 import emailUtils from '../utils/email-utils';
+import fileUtils from '../utils/file-utils';
 import { Resend } from 'resend';
 import attService from './att-service';
 import { parseHTML } from 'linkedom';
@@ -26,26 +28,17 @@ const emailService = {
 
 	async list(c, params, userId) {
 
-		let { emailId, type, accountId, size, timeSort, allReceive } = params;
+		let { emailId, type, accountId, size, timeSort, allReceive, full } = params;
 
 		size = Number(size);
-		emailId = Number(emailId);
+		emailId = Number(emailId) || 0;
 		timeSort = Number(timeSort);
 		accountId = Number(accountId);
 		allReceive = Number(allReceive);
+		full = Number(full) === 1;
 
 		if (size > 50) {
 			size = 50;
-		}
-
-		if (!emailId) {
-
-			if (timeSort) {
-				emailId = 0;
-			} else {
-				emailId = 9999999999;
-			}
-
 		}
 
 		if (isNaN(allReceive)) {
@@ -53,9 +46,13 @@ const emailService = {
 			allReceive = accountRow.allReceive;
 		}
 
+		const filters = this.emailListFilters({ userId, accountId, type, allReceive, emailId, timeSort });
+		const countFilters = this.emailListFilters({ userId, accountId, type, allReceive, withCursor: false });
+		const columns = full ? emailListColumns : emailBriefColumns;
+
 		const query = orm(c)
 			.select({
-				...email,
+				...columns,
 				starId: star.starId
 			})
 			.from(email)
@@ -65,20 +62,12 @@ const emailService = {
 					eq(star.emailId, email.emailId),
 					eq(star.userId, userId)
 				)
-			).leftJoin(
+			)
+			.innerJoin(
 				account,
 				eq(account.accountId, email.accountId)
 			)
-			.where(
-				and(
-					allReceive ? eq(1,1) : eq(email.accountId, accountId),
-					eq(email.userId, userId),
-					timeSort ? gt(email.emailId, emailId) : lt(email.emailId, emailId),
-					eq(email.type, type),
-					eq(email.isDel, isDel.NORMAL),
-					eq(account.isDel, isDel.NORMAL)
-				)
-			);
+			.where(and(...filters));
 
 		if (timeSort) {
 			query.orderBy(asc(email.emailId));
@@ -89,26 +78,23 @@ const emailService = {
 		const listQuery = query.limit(size).all();
 
 		const totalQuery = orm(c).select({ total: count() }).from(email)
-			.leftJoin(
+			.innerJoin(
 				account,
 				eq(account.accountId, email.accountId)
 			)
-			.where(
-				and(
-					allReceive ? eq(1,1) : eq(email.accountId, accountId),
-					eq(email.userId, userId),
-					eq(email.type, type),
-					eq(email.isDel, isDel.NORMAL),
-					eq(account.isDel, isDel.NORMAL)
-				)
-		).get();
+			.where(and(...countFilters))
+			.get();
 
-		const latestEmailQuery = orm(c).select().from(email).where(
+		const latestEmailQuery = orm(c).select({
+			emailId: email.emailId,
+			accountId: email.accountId,
+			userId: email.userId,
+		}).from(email).where(
 			and(
-				allReceive ? eq(1,1) : eq(email.accountId, accountId),
 				eq(email.userId, userId),
 				eq(email.type, type),
-				eq(email.isDel, isDel.NORMAL)
+				eq(email.isDel, isDel.NORMAL),
+				allReceive ? undefined : eq(email.accountId, accountId)
 			))
 			.orderBy(desc(email.emailId)).limit(1).get();
 
@@ -119,8 +105,11 @@ const emailService = {
 			isStar: item.starId != null ? 1 : 0
 		}));
 
-
-		await this.emailAddAtt(c, list);
+		if (full) {
+			await this.emailAddAtt(c, list);
+		} else {
+			this.applyListText(list);
+		}
 
 		if (!latestEmail) {
 			latestEmail = {
@@ -133,9 +122,98 @@ const emailService = {
 		return { list, total: totalRow.total, latestEmail };
 	},
 
+	toListText(item) {
+		const raw = emailUtils.formatText(item.text) || emailUtils.htmlToText(item.content);
+		return raw.replace(/\s+/g, ' ').trim().slice(0, EMAIL_LIST_TEXT_LEN);
+	},
+
+	applyListText(list) {
+		for (const item of list) {
+			item.text = this.toListText(item);
+			delete item.content;
+		}
+		return list;
+	},
+
+	emailListFilters({ userId, accountId, type, allReceive, emailId, timeSort, withCursor = true }) {
+		const conditions = [
+			eq(email.userId, userId),
+			eq(email.type, type),
+			eq(email.isDel, isDel.NORMAL),
+			eq(account.isDel, isDel.NORMAL),
+		];
+		if (!allReceive) {
+			conditions.push(eq(email.accountId, accountId));
+		}
+		if (withCursor && emailId) {
+			conditions.push(timeSort ? gt(email.emailId, emailId) : lt(email.emailId, emailId));
+		}
+		return conditions;
+	},
+
+	allEmailListFilters({ emailId, name, subject, accountEmail, userEmail, type, timeSort, withCursor = true }) {
+		const conditions = [];
+
+		if (type === 'send') {
+			conditions.push(eq(email.type, emailConst.type.SEND));
+		}
+
+		if (type === 'receive') {
+			conditions.push(eq(email.type, emailConst.type.RECEIVE));
+		}
+
+		if (type === 'delete') {
+			conditions.push(eq(email.isDel, isDel.DELETE));
+		}
+
+		if (type === 'noone') {
+			conditions.push(eq(email.status, emailConst.status.NOONE));
+		}
+
+		if (userEmail) {
+			conditions.push(sql`${user.email} COLLATE NOCASE LIKE ${userEmail + '%'}`);
+		}
+
+		if (accountEmail) {
+			conditions.push(
+				or(
+					sql`${email.toEmail} COLLATE NOCASE LIKE ${accountEmail + '%'}`,
+					sql`${email.sendEmail} COLLATE NOCASE LIKE ${accountEmail + '%'}`,
+				)
+			);
+		}
+
+		if (name) {
+			conditions.push(sql`${email.name} COLLATE NOCASE LIKE ${name + '%'}`);
+		}
+
+		if (subject) {
+			conditions.push(sql`${email.subject} COLLATE NOCASE LIKE ${subject + '%'}`);
+		}
+
+		if (withCursor && emailId) {
+			conditions.push(timeSort ? gt(email.emailId, emailId) : lt(email.emailId, emailId));
+		}
+
+		return conditions;
+	},
+
 	async delete(c, params, userId) {
 		const { emailIds } = params;
 		const emailIdList = emailIds.split(',').map(Number);
+		const { syncDelete } = await settingService.query(c);
+
+		if (syncDelete === settingConst.syncDelete.OPEN) {
+			const owned = await orm(c).select({ emailId: email.emailId }).from(email)
+				.where(and(eq(email.userId, userId), inArray(email.emailId, emailIdList)))
+				.all();
+			const ownedIds = owned.map(row => row.emailId);
+			if (ownedIds.length) {
+				await this.physicsDelete(c, { emailIds: ownedIds.join(',') });
+			}
+			return;
+		}
+
 		await orm(c).update(email).set({ isDel: isDel.DELETE }).where(
 			and(
 				eq(email.userId, userId),
@@ -160,7 +238,7 @@ const emailService = {
 			text, //邮件纯文本
 			content, //邮件内容
 			subject, //邮件标题
-			attachments //附件
+			attachments = [] //附件
 		} = params;
 
 		const { resendTokens, r2Domain, send, domainList } = await settingService.query(c);
@@ -230,10 +308,11 @@ const emailService = {
 
 		const domain = emailUtils.getDomain(accountRow.email);
 		const resendToken = resendTokens[domain];
+		const useCloudflareEmail = !!c.env.email;
 
-		//如果接收方存在站外邮箱，又没有resend token
-		if (!resendToken && !allInternal) {
-			throw new BizError(t('noResendToken'));
+		//如果接收方存在站外邮箱，又没有发信服务
+		if (!useCloudflareEmail && !resendToken && !allInternal) {
+			throw new BizError(t('noSendProvider'));
 		}
 
 		//没有发件人名字自动截取
@@ -256,34 +335,40 @@ const emailService = {
 
 		}
 
-		let resendResult = {};
+		let sendResult = {};
 
-		//存在站外时邮箱全部由resend发送
+		//存在站外邮箱时，如果配置了 Cloudflare Email Service 就优先使用，否则使用 Resend
 		if (!allInternal) {
 
-			const resend = new Resend(resendToken);
-
-			const sendForm = {
-				from: `${name} <${accountRow.email}>`,
-				to: [...receiveEmail],
-				subject: subject,
-				text: text,
-				html: html,
-				attachments: [...imageDataList, ...attachments]
-			};
-
-			if (sendType === 'reply') {
-				sendForm.headers = {
-					'in-reply-to': emailRow.messageId,
-					'references': emailRow.messageId
-				};
+			if (useCloudflareEmail) {
+				sendResult = await this.sendByCloudflareEmail(c, {
+					name,
+					accountEmail: accountRow.email,
+					receiveEmail,
+					subject,
+					text,
+					html,
+					attachments: [...imageDataList, ...attachments],
+					sendType,
+					messageId: emailRow.messageId
+				});
+			} else {
+				sendResult = await this.sendByResend(resendToken, {
+					name,
+					accountEmail: accountRow.email,
+					receiveEmail,
+					subject,
+					text,
+					html,
+					attachments: [...imageDataList, ...attachments],
+					sendType,
+					messageId: emailRow.messageId
+				});
 			}
-
-			resendResult = await resend.emails.send(sendForm);
 
 		}
 
-		const { data, error } = resendResult;
+		const { data, error } = sendResult;
 
 
 		if (error) {
@@ -303,7 +388,7 @@ const emailService = {
 		emailData.content = html;
 		emailData.text = text;
 		emailData.accountId = accountId;
-		emailData.status = emailConst.status.SENT;
+		emailData.status = useCloudflareEmail ? emailConst.status.DELIVERED : emailConst.status.SENT;
 		emailData.type = emailConst.type.SEND;
 		emailData.userId = userId;
 		emailData.resendEmailId = data?.id;
@@ -367,6 +452,171 @@ const emailService = {
 		return [ emailResult ];
 	},
 
+	async sendByCloudflareEmail(c, params) {
+		const sendForm = {
+			from: { email: params.accountEmail, name: params.name },
+			to: [...params.receiveEmail],
+			subject: params.subject
+		};
+
+		if (params.text) {
+			sendForm.text = params.text;
+		}
+
+		if (params.html) {
+			sendForm.html = params.html;
+		}
+
+		const attachments = await this.toCloudflareAttachments(params.attachments);
+		if (attachments.length > 0) {
+			sendForm.attachments = attachments;
+		}
+
+		if (params.sendType === 'reply' && params.messageId) {
+			sendForm.headers = {
+				'in-reply-to': params.messageId,
+				'references': params.messageId
+			};
+		}
+
+		const result = await c.env.email.send(sendForm);
+
+		return {
+			data: {
+				id: result.messageId
+			}
+		};
+	},
+
+	async sendByResend(resendToken, params) {
+		const resend = new Resend(resendToken);
+
+		const sendForm = {
+			from: `${params.name} <${params.accountEmail}>`,
+			to: [...params.receiveEmail],
+			subject: params.subject,
+			text: params.text,
+			html: params.html,
+			attachments: await this.toResendAttachments(params.attachments)
+		};
+
+		if (params.sendType === 'reply') {
+			sendForm.headers = {
+				'in-reply-to': params.messageId,
+				'references': params.messageId
+			};
+		}
+
+		return await resend.emails.send(sendForm);
+	},
+
+	async toCloudflareAttachments(attachments) {
+		const arrayBufferAttachments = await this.toArrayBufferAttachments(attachments);
+
+		return arrayBufferAttachments.map(attachment => {
+			const item = {
+				content: attachment.content,
+				filename: attachment.filename,
+				type: attachment.mimeType || attachment.contentType || attachment.type || 'application/octet-stream',
+				disposition: attachment.contentId ? 'inline' : 'attachment'
+			};
+
+			if (attachment.contentId) {
+				item.contentId = attachment.contentId.replace(/^<|>$/g, '');
+			}
+
+			return item;
+		});
+	},
+
+	async toResendAttachments(attachments = []) {
+		const result = [];
+
+		for (const attachment of attachments) {
+			const content = await this.toAttachmentBase64(attachment);
+			if (!content) {
+				continue;
+			}
+
+			result.push({
+				...attachment,
+				content,
+				contentType: attachment.contentType || attachment.mimeType || attachment.type || 'application/octet-stream'
+			});
+		}
+
+		return result;
+	},
+
+	async toArrayBufferAttachments(attachments = []) {
+		const result = [];
+
+		for (const attachment of attachments) {
+			const content = await this.toAttachmentArrayBuffer(attachment);
+			if (!content) {
+				continue;
+			}
+
+			result.push({ ...attachment, content });
+		}
+
+		return result;
+	},
+
+	async toAttachmentBase64(attachment) {
+		let content = attachment.content;
+
+		if (!content) {
+			return null;
+		}
+
+		if (typeof content === 'string') {
+			if (content.startsWith('data:')) {
+				content = content.split(',')[1] || content;
+			}
+			return content.replace(/\s+/g, '');
+		}
+
+		const arrayBuffer = await this.toAttachmentArrayBuffer(attachment);
+		if (!arrayBuffer) {
+			return null;
+		}
+
+		const bytes = new Uint8Array(arrayBuffer);
+		let binary = '';
+
+		for (let i = 0; i < bytes.length; i += 0x8000) {
+			binary += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
+		}
+
+		return btoa(binary);
+	},
+
+	async toAttachmentArrayBuffer(attachment) {
+		let content = attachment.content;
+
+		if (!content) {
+			return null;
+		}
+
+		if (content instanceof ArrayBuffer) {
+			return content;
+		}
+
+		if (content instanceof Uint8Array) {
+			return content.buffer.slice(content.byteOffset, content.byteOffset + content.byteLength);
+		}
+
+		if (typeof content === 'string') {
+			if (content.startsWith('data:')) {
+				content = content.split(',')[1] || content;
+			}
+			return fileUtils.base64ToUint8Array(content.replace(/\s+/g, '')).buffer;
+		}
+
+		return content;
+	},
+
 	//处理站内邮件发送
 	async HandleOnSiteEmail(c, receiveEmail, sendEmailData, attList) {
 
@@ -375,8 +625,29 @@ const emailService = {
 		//查询所有收件人账号信息
 		let accountList = await orm(c).select().from(account).where(inArray(account.email, receiveEmail)).all();
 
+		// 对于含+未精确匹配的收件人，获取基础地址账号
+		const plusEmails = receiveEmail.filter(
+			e => e.includes('+') && !accountList.some(a => a.email === e)
+		);
+		const baseAccounts = [];
+		if (plusEmails.length > 0) {
+			const baseEmails = [...new Set(
+				plusEmails.map(e => emailUtils.getBaseEmail(e)).filter(Boolean)
+			)];
+			const existing = new Set(accountList.map(a => a.email));
+			const needed = baseEmails.filter(e => !existing.has(e));
+			if (needed.length > 0) {
+				const rows = await orm(c).select().from(account)
+					.where(inArray(account.email, needed)).all();
+				baseAccounts.push(...rows);
+			}
+		}
+
+		// 合并精确匹配和基础地址匹配的账号用于权限查询
+		const allAccounts = [...accountList, ...baseAccounts];
+
 		//查询所有收件人权限身份
-		const userIds = accountList.map(accountRow => accountRow.userId);
+		const userIds = allAccounts.map(accountRow => accountRow.userId);
 		let roleList = await roleService.selectByUserIds(c, userIds);
 
 		//封装数据库准备保存到数据库
@@ -392,7 +663,13 @@ const emailService = {
 			emailValues.toName = emailUtils.getName(email);
 			emailValues.emailId = null;
 
-			const accountRow = accountList.find(accountRow => accountRow.email === email);
+			let accountRow = allAccounts.find(accountRow => accountRow.email === email);
+
+			// 精确匹配不到时回退到主地址（去掉 +tag）
+			if (!accountRow && email.includes('+')) {
+				const baseEmail = emailUtils.getBaseEmail(email);
+				accountRow = allAccounts.find(accountRow => accountRow.email === baseEmail);
+			}
 
 			//如果收件人存在就把邮件信息改成收件人的
 			if (accountRow) {
@@ -536,8 +813,8 @@ const emailService = {
 			allReceive = accountRow.allReceive;
 		}
 
-		let list = await orm(c).select({...email}).from(email)
-			.leftJoin(
+		let list = await orm(c).select({ ...emailBriefColumns }).from(email)
+			.innerJoin(
 				account,
 				eq(account.accountId, email.accountId)
 			)
@@ -547,15 +824,13 @@ const emailService = {
 					eq(email.userId, userId),
 					eq(email.isDel, isDel.NORMAL),
 					eq(account.isDel, isDel.NORMAL),
-					allReceive ? eq(1,1) : eq(email.accountId, accountId),
+					allReceive ? undefined : eq(email.accountId, accountId),
 					eq(email.type, emailConst.type.RECEIVE)
 				))
 			.orderBy(desc(email.emailId))
 			.limit(20);
 
-		await this.emailAddAtt(c, list);
-
-		return list;
+		return this.applyListText(list);
 	},
 
 	async physicsDelete(c, params) {
@@ -598,85 +873,36 @@ const emailService = {
 
 	async allList(c, params) {
 
-		let { emailId, size, name, subject, accountEmail, userEmail, type, timeSort } = params;
+		let { emailId, size, name, subject, accountEmail, userEmail, type, timeSort, full } = params;
 
 		size = Number(size);
 
-		emailId = Number(emailId);
+		emailId = Number(emailId) || 0;
 		timeSort = Number(timeSort);
+		full = Number(full) === 1;
 
 		if (size > 50) {
 			size = 50;
 		}
 
-		if (!emailId) {
+		const filters = this.allEmailListFilters({ emailId, name, subject, accountEmail, userEmail, type, timeSort });
+		const countFilters = this.allEmailListFilters({ emailId, name, subject, accountEmail, userEmail, type, timeSort, withCursor: false });
+		const columns = full ? emailListColumns : emailBriefColumns;
 
-			if (timeSort) {
-				emailId = 0;
-			} else {
-				emailId = 9999999999;
-			}
-
-		}
-
-		const conditions = [];
-
-		if (type === 'send') {
-			conditions.push(eq(email.type, emailConst.type.SEND));
-		}
-
-		if (type === 'receive') {
-			conditions.push(eq(email.type, emailConst.type.RECEIVE));
-		}
-
-		if (type === 'delete') {
-			conditions.push(eq(email.isDel, isDel.DELETE));
-		}
-
-		if (type === 'noone') {
-			conditions.push(eq(email.status, emailConst.status.NOONE));
-		}
-
-		if (userEmail) {
-			conditions.push(sql`${user.email} COLLATE NOCASE LIKE ${'%'+ userEmail + '%'}`);
-		}
-
-		if (accountEmail) {
-			conditions.push(
-				or(
-					sql`${email.toEmail} COLLATE NOCASE LIKE ${'%'+ accountEmail + '%'}`,
-					sql`${email.sendEmail} COLLATE NOCASE LIKE ${'%'+ accountEmail + '%'}`,
-				)
-			)
-		}
-
-		if (name) {
-			conditions.push(sql`${email.name} COLLATE NOCASE LIKE ${'%'+ name + '%'}`);
-		}
-
-		if (subject) {
-			conditions.push(sql`${email.subject} COLLATE NOCASE LIKE ${'%'+ subject + '%'}`);
-		}
-
-		conditions.push(ne(email.status, emailConst.status.SAVING));
-
-		const countConditions = [...conditions];
-
-		if (timeSort) {
-			conditions.unshift(gt(email.emailId, emailId));
-		} else {
-			conditions.unshift(lt(email.emailId, emailId));
-		}
-
-		const query = orm(c).select({ ...email, userEmail: user.email })
+		const query = orm(c).select({ ...columns, userEmail: user.email })
 			.from(email)
 			.leftJoin(user, eq(email.userId, user.userId))
-			.where(and(...conditions));
+			.where(and(...filters));
 
-		const queryCount = orm(c).select({ total: count() })
-			.from(email)
-			.leftJoin(user, eq(email.userId, user.userId))
-			.where(and(...countConditions));
+		// count 不搜用户时无需 join user
+		const queryCount = userEmail
+			? orm(c).select({ total: count() })
+				.from(email)
+				.leftJoin(user, eq(email.userId, user.userId))
+				.where(and(...countFilters))
+			: orm(c).select({ total: count() })
+				.from(email)
+				.where(and(...countFilters));
 
 		if (timeSort) {
 			query.orderBy(asc(email.emailId));
@@ -684,18 +910,23 @@ const emailService = {
 			query.orderBy(desc(email.emailId));
 		}
 
-		const listQuery = await query.limit(size).all();
-		const totalQuery = await queryCount.get();
-		const latestEmailQuery = await orm(c).select().from(email)
-			.where(and(
-				eq(email.type, emailConst.type.RECEIVE),
-				ne(email.status, emailConst.status.SAVING)
-			))
+		const listQuery = query.limit(size).all();
+		const totalQuery = queryCount.get();
+		const latestEmailQuery = orm(c).select({
+			emailId: email.emailId,
+			accountId: email.accountId,
+			userId: email.userId,
+		}).from(email)
+			.where(eq(email.type, emailConst.type.RECEIVE))
 			.orderBy(desc(email.emailId)).limit(1).get();
 
 		let [list, totalRow, latestEmail] = await Promise.all([listQuery, totalQuery, latestEmailQuery]);
 
-		await this.emailAddAtt(c, list);
+		if (full) {
+			await this.emailAddAtt(c, list);
+		} else {
+			this.applyListText(list);
+		}
 
 		if (!latestEmail) {
 			latestEmail = {
@@ -712,20 +943,17 @@ const emailService = {
 
 		const { emailId } = params;
 
-		let list = await orm(c).select({...email, userEmail: user.email}).from(email)
+		let list = await orm(c).select({ ...emailBriefColumns, userEmail: user.email }).from(email)
 			.leftJoin(user, eq(email.userId, user.userId))
 			.where(
 				and(
 					gt(email.emailId, emailId),
-					eq(email.type, emailConst.type.RECEIVE),
-					ne(email.status, emailConst.status.SAVING)
+					eq(email.type, emailConst.type.RECEIVE)
 				))
 			.orderBy(desc(email.emailId))
 			.limit(20);
 
-		await this.emailAddAtt(c, list);
-
-		return list;
+		return this.applyListText(list);
 	},
 
 	async emailAddAtt(c, list) {
