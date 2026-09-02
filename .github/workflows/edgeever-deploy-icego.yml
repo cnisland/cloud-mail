@@ -38,8 +38,3 @@ jobs:
       - name: Deploy Worker
         run: bun run deploy
 
-      - name: Apply D1 Migrations
-        run: |
-          npx wrangler d1 migrations apply edgeever \
-            --database-id 2f7f280d-95a6-43d6-9629-d352a2140d96 \
-            --remote
