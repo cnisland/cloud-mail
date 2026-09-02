@@ -1,0 +1,65 @@
+name: Deploy Cloud Mail (icego)
+
+on:
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: mail-worker
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11
+          run_install: false
+      - name: Install worker deps
+        run: pnpm install --no-frozen-lockfile
+      - name: Write wrangler.toml
+        run: |
+          cat > wrangler.toml << 'EOF'
+          name = "cloud-mail"
+          main = "src/index.js"
+          compatibility_date = "2025-06-04"
+          [observability]
+          enabled = true
+          [[d1_databases]]
+          binding = "db"
+          database_name = "cloud-mail-db"
+          database_id = "e37f1aae-3b28-4d16-9d1f-09d300c0d228"
+          [[kv_namespaces]]
+          binding = "kv"
+          id = "2856a554cba740999c422542fa2d9b65"
+          [[r2_buckets]]
+          binding = "r2"
+          bucket_name = "cloud-mail-r2"
+          [assets]
+          binding = "assets"
+          directory = "./dist"
+          not_found_handling = "single-page-application"
+          run_worker_first = true
+          [triggers]
+          crons = ["0 16 * * *"]
+          [vars]
+          orm_log = "false"
+          domain = '["yycn.site","yyorg.com"]'
+          admin = "admin@yycn.site"
+          jwt_secret = "b7f29a1d-18e2-4d3b-941f-f6b2c97c02fd"
+          ADMIN_PASSWORD = "cnisland2026mail"
+          [build]
+          command = "pnpm --prefix ../mail-vue install --no-frozen-lockfile && pnpm --prefix ../mail-vue run build"
+          EOF
+      - name: Deploy
+        uses: cloudflare/wrangler-action@v3
+        with:
+          apiToken: ${{ secrets.CF_ICEGO_TOKEN }}
+          accountId: ${{ secrets.CF_ICEGO_ACCOUNT_ID }}
+          command: deploy
+          packageManager: pnpm
+          wranglerVersion: "3.114.17"
+          workingDirectory: mail-worker
