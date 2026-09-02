@@ -1,0 +1,45 @@
+name: Deploy EdgeEver (icego)
+
+on:
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    env:
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CF_ICEGO_ACCOUNT_ID }}
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CF_ICEGO_TOKEN }}
+      EDGE_EVER_WORKER_NAME: edgeever
+      EDGE_EVER_D1_DATABASE_NAME: edgeever
+      EDGE_EVER_D1_DATABASE_ID: 2f7f280d-95a6-43d6-9629-d352a2140d96
+      EDGE_EVER_R2_BUCKET_NAME: edgeever-resources
+      EDGE_EVER_R2_PREVIEW_BUCKET_NAME: edgeever-resources
+      EDGE_EVER_CUSTOM_DOMAIN: wiki.yycn.site
+      EDGE_EVER_DEPLOYMENT_URL: https://wiki.yycn.site
+      EDGE_EVER_DEPLOYMENT_TRIGGER: manual
+      EDGE_EVER_DEPLOYMENT_METHOD: github_actions
+      EDGE_EVER_RELEASED_AT: "2026-09-01T18:37:42Z"
+
+    steps:
+      - name: Checkout EdgeEver v1.53.0
+        uses: actions/checkout@v4
+        with:
+          repository: tianma-if/edgeever
+          ref: v1.53.0
+
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Deploy Worker
+        run: bun run deploy
+
+      - name: Apply D1 Migrations
+        run: |
+          npx wrangler d1 migrations apply edgeever \
+            --database-id 2f7f280d-95a6-43d6-9629-d352a2140d96 \
+            --remote
